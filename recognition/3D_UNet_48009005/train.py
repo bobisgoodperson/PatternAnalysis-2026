@@ -99,6 +99,7 @@ def train_2d(epochs=5, batch_size=4, learning_rate=0.001):
         
         # Validation
         model.eval()
+        val_loss = 0.0
         
         #store validation Dice and IoU values
         dice_scores = {
@@ -119,7 +120,7 @@ def train_2d(epochs=5, batch_size=4, learning_rate=0.001):
                 # forward pass
                 outputs = model(images)
                 loss = criterion(outputs, masks)
-                val_loss = +- loss.item()
+                val_loss += loss.item()
                 
                 #Choose the predicted class at each pixel
                 predictions = torch.argmax(outputs, dim=1)
@@ -135,7 +136,7 @@ def train_2d(epochs=5, batch_size=4, learning_rate=0.001):
         print(
             f"Epoch {epoch + 1}/{epochs} "
             f"Training Loss: {average_loss:.4f}"
-            f"Validation Loss: {average_loss:.4f}"
+            f"Validation Loss: {average_val_loss:.4f}"
         )
         
         #display average validation metrics
