@@ -162,53 +162,6 @@ class UNet2D(nn.Module):
         #Segment 
         return self.output(d1)
 
-    """
-    Two 3x3x3 convolution layers used throughout the 3D U-Net.
-    """
-
-    def __init__(self, in_channels, out_channels):
-        """
-        Initialise the double 3D convolution block.
-        """
-
-        super().__init__()
-
-        self.block = nn.Sequential(
-
-            # Learn features across depth, height and width
-            nn.Conv3d(
-                in_channels,
-                out_channels,
-                kernel_size=3,
-                padding=1
-            ),
-
-            # Normalise the 3D feature maps
-            nn.BatchNorm3d(out_channels),
-
-            # Add non-linearity
-            nn.ReLU(inplace=True),
-
-            # Refine the learned volumetric features
-            nn.Conv3d(
-                out_channels,
-                out_channels,
-                kernel_size=3,
-                padding=1
-            ),
-
-            nn.BatchNorm3d(out_channels),
-
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x):
-        """
-        Pass the input through the double 3D convolution block.
-        """
-
-        return self.block(x)
-
 class UNet3D(nn.Module):
     """
     Standard 3D U-Net for HipMRI volumetric segmentation.
