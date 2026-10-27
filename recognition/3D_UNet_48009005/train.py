@@ -8,7 +8,7 @@ from modules import UNet2D
 from metrics import calculate_dice_iou
 
 
-def train_2d(epochs=5, batch_size=4, learning_rate=0.001):
+def train_2d(epochs=5, batch_size=1, learning_rate=0.001):
     """
     Train the 2D U-Net baseline on the HipMRI training slices.
     """
