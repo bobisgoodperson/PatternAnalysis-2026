@@ -3,8 +3,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import HipMRI2DDataset, SLICE_DATA_DIR
-from modules import UNet2D
+from dataset import *
+from modules import UNet2D, UNet3D
 from metrics import calculate_dice_iou
 
 
@@ -156,6 +156,90 @@ def train_2d(epochs=5, batch_size=1, learning_rate=0.001):
             best_val_loss = average_val_loss
             torch.save(model.state_dict(), "best_2d_unet.pth")
             print ("best model saved")
+    return model
+
+def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
+    """
+    Train the 3D U-Net on the HipMRI MRI volumes.
+    """
+
+    # Use GPU if available
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    print(f"Using device: {device}")
+
+    # Find all matching MRI and segmentation volumes
+    pairs = find_volume_pairs()
+
+    # Split patients into training, validation and testing groups
+    train_patients, val_patients, test_patients = split_patients(pairs)
+
+    # Only use volumes belonging to training patients
+    train_pairs = [pair for pair in pairs if pair["patient"] in train_patients]
+
+    print(f"Training volumes: {len(train_pairs)}")
+
+    # Create 3D training dataset
+    train_dataset = HipMRI3DDataset(train_pairs)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+    # Create 3D U-Net
+    model = UNet3D(in_channels=1, num_classes=6).to(device)
+
+    # Multi-class segmentation loss
+    criterion = nn.CrossEntropyLoss()
+
+    # Optimiser
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+
+    # Training epochs
+    for epoch in range(epochs):
+
+        model.train()
+
+        running_loss = 0.0
+
+        for images, masks, mask_one_hot in tqdm(
+            train_loader,
+            desc=f"3D Epoch {epoch + 1}/{epochs}"
+        ):
+
+            images = images.to(device)
+            masks = masks.to(device)
+
+            # Clear previous gradients
+            optimizer.zero_grad()
+
+            # Forward pass
+            outputs = model(images)
+
+            # Calculate loss
+            loss = criterion(
+                outputs,
+                masks
+            )
+
+            # Backpropagation
+            loss.backward()
+
+            # Update model weights
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        average_loss = (
+            running_loss
+            / len(train_loader)
+        )
+
+        print(
+            f"3D Epoch {epoch + 1}/{epochs} "
+            f"Training Loss: {average_loss:.4f}"
+        )
+
     return model
 
 
