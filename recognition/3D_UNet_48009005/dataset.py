@@ -89,6 +89,32 @@ def load_data_2D(image_name, normImage=False, dtype=np.float32):
 
     return inImage
 
+def load_data_3D(image_name, normImage=False, dtype=np.float32):
+    """
+    Load one 3D NIfTI volume.
+
+    Adapted from Appendix B of the COMP3710 2026
+    Final Assessment Specification v2.4.
+    """
+
+    niftiImage = nib.load(image_name)
+
+    inImage = niftiImage.get_fdata(
+        caching="unchanged"
+    )
+
+    inImage = inImage.astype(dtype)
+
+    # Z-score normalisation
+    if normImage:
+        inImage = (
+            inImage - inImage.mean()
+        ) / (
+            inImage.std() + 1e-8
+        )
+
+    return inImage
+
 class HipMRI2DDataset(Dataset):
     """
     Load paired 2D HipMRI MRI slices and segmentation masks.
@@ -159,6 +185,96 @@ class HipMRI2DDataset(Dataset):
 
         return image, mask, mask_one_hot
 
+class HipMRI3DDataset(Dataset):
+    """
+    Load paired 3D HipMRI MRI volumes and segmentation masks.
+    """
+
+    def __init__(
+        self,
+        pairs,
+        target_size=(64, 128, 128),
+        num_classes=6
+    ):
+        """
+        Store the MRI/segmentation pairs and target volume size.
+        """
+
+        self.pairs = pairs
+        self.target_size = target_size
+        self.num_classes = num_classes
+
+    def __len__(self):
+        """
+        Return the number of 3D MRI volumes.
+        """
+
+        return len(self.pairs)
+
+    def __getitem__(self, index):
+        """
+        Load one MRI volume and its matching segmentation mask.
+        """
+
+        pair = self.pairs[index]
+
+        # Load and normalise MRI
+        image = load_data_3D(
+            pair["mr"],
+            normImage=True,
+            dtype=np.float32
+        )
+
+        # Load segmentation without normalisation
+        mask = load_data_3D(
+            pair["label"],
+            normImage=False,
+            dtype=np.int64
+        )
+
+        # MRI and mask should have the same dimensions
+        if image.shape != mask.shape:
+            raise ValueError(
+                f"Shape mismatch for {pair['patient']}: "
+                f"MRI {image.shape}, mask {mask.shape}"
+            )
+
+        # NIfTI data is stored as H, W, D.
+        # PyTorch Conv3d expects D, H, W.
+        image = torch.from_numpy(
+            image
+        ).permute(2, 0, 1)
+
+        mask = torch.from_numpy(
+            mask
+        ).permute(2, 0, 1)
+
+        # Add channel dimension to MRI
+        image = image.unsqueeze(0)
+
+        # Downsample the MRI volume
+        image = F.interpolate(
+            image.unsqueeze(0),
+            size=self.target_size,
+            mode="trilinear",
+            align_corners=False
+        ).squeeze(0)
+
+        # Downsample the segmentation mask.
+        # Nearest neighbour keeps the integer class labels.
+        mask = F.interpolate(
+            mask.unsqueeze(0).unsqueeze(0).float(),
+            size=self.target_size,
+            mode="nearest"
+        ).squeeze(0).squeeze(0).long()
+
+        # Convert segmentation to one-hot channels
+        mask_one_hot = F.one_hot(
+            mask,
+            num_classes=self.num_classes
+        ).permute(3, 0, 1, 2).float()
+
+        return image, mask, mask_one_hot
 #check to see if it matches correctly
 
 if __name__ == "__main__":
@@ -216,3 +332,17 @@ if __name__ == "__main__":
     print(f"Image mean: {image.mean().item():.4f}")
     print(f"Image std: {image.std().item():.4f}")
     print(f"Mask labels: {mask.unique()}")
+    
+    print("\nTesting 3D dataset loader...")
+
+    dataset_3d = HipMRI3DDataset(pairs)
+
+    image_3d, mask_3d, mask_one_hot_3d = dataset_3d[0]
+
+    print(f"3D image shape: {image_3d.shape}")
+    print(f"3D mask shape: {mask_3d.shape}")
+    print(f"3D one-hot shape: {mask_one_hot_3d.shape}")
+
+    print(f"3D image mean: {image_3d.mean().item():.4f}")
+    print(f"3D image std: {image_3d.std().item():.4f}")
+    print(f"3D mask labels: {mask_3d.unique()}")
