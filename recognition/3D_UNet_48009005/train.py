@@ -180,11 +180,20 @@ def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
     train_pairs = [pair for pair in pairs if pair["patient"] in train_patients]
 
     print(f"Training volumes: {len(train_pairs)}")
-
+    
     # Create 3D training dataset
     train_dataset = HipMRI3DDataset(train_pairs)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    
+    # Use separate patients for validation
+    val_pairs = [pair for pair in pairs if pair["patient"] in val_patients]
+    
+    # Create validation dataset and loader
+    val_dataset = HipMRI3DDataset(val_pairs)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    print(f"Validation volumes: {len(val_dataset)}")
 
     # Create 3D U-Net
     model = UNet3D(in_channels=1, num_classes=6).to(device)
@@ -239,6 +248,60 @@ def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
             f"3D Epoch {epoch + 1}/{epochs} "
             f"Training Loss: {average_loss:.4f}"
         )
+        
+        # Validation
+        model.eval()
+        val_loss = 0.0
+
+        # Store Dice and IoU for each foreground class
+        dice_scores = {class_id: [] for class_id in range(1, 6)}
+        iou_scores = {class_id: [] for class_id in range(1, 6)}
+
+        # Gradients are not needed during validation
+        with torch.no_grad():
+            for images, masks, _ in val_loader:
+                images = images.to(device)
+                masks = masks.to(device)
+
+                # Forward pass
+                outputs = model(images)
+
+                # Calculate validation loss
+                loss = criterion(outputs, masks)
+                val_loss += loss.item()
+
+                # Get the predicted label for each voxel
+                predictions = torch.argmax(outputs, dim=1)
+
+                # Calculate Dice and IoU for labels 1 to 5
+                results = calculate_dice_iou(
+                    predictions, masks, num_classes=6
+                )
+
+                for class_id, scores in results.items():
+                    dice_scores[class_id].append(scores["dice"])
+                    iou_scores[class_id].append(scores["iou"])
+
+        average_val_loss = val_loss / len(val_loader)
+
+        print(f"Validation Loss: {average_val_loss:.4f}")
+
+        # Display average Dice and IoU for each class
+        for class_id in range(1, 6):
+            if dice_scores[class_id]:
+                average_dice = (
+                    sum(dice_scores[class_id]) / len(dice_scores[class_id])
+                )
+                average_iou = (
+                    sum(iou_scores[class_id]) / len(iou_scores[class_id])
+                )
+
+                print(
+                    f"Class {class_id}: "
+                    f"Dice = {average_dice:.4f}, "
+                    f"IoU = {average_iou:.4f}"
+                )
+
 
     return model
 
