@@ -158,6 +158,256 @@ def train_2d(epochs=5, batch_size=1, learning_rate=0.001):
             print ("best model saved")
     return model
 
+
+def train_2d_aligned(epochs=20, slice_batch_size=8, learning_rate=0.001):
+    """
+    Train a 2D U-Net on the same patients and preprocessed
+    MRI volumes used by the 3D U-Net.
+    """
+
+    torch.manual_seed(67)
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    print(f"Using device: {device}")
+
+    # Use the same patient split as the 3D model
+    pairs = find_volume_pairs()
+    train_patients, val_patients, test_patients = split_patients(pairs)
+
+    assert set(train_patients).isdisjoint(val_patients)
+    assert set(train_patients).isdisjoint(test_patients)
+    assert set(val_patients).isdisjoint(test_patients)
+
+    train_pairs = [
+        pair for pair in pairs
+        if pair["patient"] in train_patients
+    ]
+
+    val_pairs = [
+        pair for pair in pairs
+        if pair["patient"] in val_patients
+    ]
+
+    # Reuse the 3D preprocessing to keep inputs consistent
+    train_dataset = HipMRI3DDataset(train_pairs)
+    val_dataset = HipMRI3DDataset(val_pairs)
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=1, shuffle=True
+    )
+
+    val_loader = DataLoader(
+        val_dataset, batch_size=1, shuffle=False
+    )
+
+    print(f"Training volumes: {len(train_dataset)}")
+    print(f"Validation volumes: {len(val_dataset)}")
+
+    # Use the existing 2D U-Net architecture
+    model = UNet2D(in_channels=1, num_classes=6).to(device)
+
+    parameter_count = sum(
+        p.numel() for p in model.parameters()
+    )
+    print(f"Model parameters: {parameter_count:,}")
+
+    # Same training class weights as the weighted 3D U-Net
+    class_counts = torch.tensor(
+        [87254835, 53391820, 4918408, 855653, 217516, 162408],
+        dtype=torch.float32,
+        device=device
+    )
+
+    class_weights = torch.sqrt(
+        class_counts.sum() / class_counts
+    )
+    class_weights = class_weights / class_weights.mean()
+
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=learning_rate
+    )
+
+    best_val_loss = float("inf")
+
+    train_history = []
+    val_history = []
+    dice_history = []
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+
+    for epoch in range(epochs):
+
+        # Training
+        model.train()
+        running_loss = 0.0
+        train_slices = 0
+
+        for images, masks, _ in tqdm(
+            train_loader,
+            desc=f"2D Epoch {epoch + 1}/{epochs}"
+        ):
+
+            # Convert one volume into a batch of 2D slices
+            # [1, 1, D, H, W] -> [D, 1, H, W]
+            images = images[0].permute(1, 0, 2, 3)
+            masks = masks[0]
+
+            images = images.to(device)
+            masks = masks.to(device)
+
+            # Process the slices in small batches
+            for start in range(0, len(images), slice_batch_size):
+                x = images[start:start + slice_batch_size]
+                y = masks[start:start + slice_batch_size]
+
+                optimizer.zero_grad()
+
+                outputs = model(x)
+                loss = criterion(outputs, y)
+
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item() * len(x)
+                train_slices += len(x)
+
+        average_train_loss = running_loss / train_slices
+
+        # Validation
+        model.eval()
+
+        validation_loss = 0.0
+        validation_slices = 0
+
+        # Count actual and predicted voxels for each class
+        confusion = torch.zeros(
+            (6, 6), dtype=torch.long, device=device
+        )
+
+        with torch.inference_mode():
+
+            for images, masks, _ in val_loader:
+
+                images = images[0].permute(1, 0, 2, 3)
+                masks = masks[0]
+
+                images = images.to(device)
+                masks = masks.to(device)
+
+                for start in range(0, len(images), slice_batch_size):
+                    x = images[start:start + slice_batch_size]
+                    y = masks[start:start + slice_batch_size]
+
+                    outputs = model(x)
+                    loss = criterion(outputs, y)
+
+                    validation_loss += loss.item() * len(x)
+                    validation_slices += len(x)
+
+                    predictions = outputs.argmax(dim=1)
+
+                    counts = torch.bincount(
+                        (y * 6 + predictions).reshape(-1),
+                        minlength=36
+                    ).reshape(6, 6)
+
+                    confusion += counts
+
+        average_val_loss = validation_loss / validation_slices
+
+        # Calculate Dice across all validation voxels
+        dice_scores = []
+
+        for class_id in range(1, 6):
+            intersection = confusion[class_id, class_id].item()
+
+            actual_count = confusion[class_id, :].sum().item()
+            predicted_count = confusion[:, class_id].sum().item()
+
+            if actual_count + predicted_count > 0:
+                dice = (
+                    2 * intersection / (actual_count + predicted_count)
+                )
+
+                dice_scores.append(dice)
+
+                print(f"Class {class_id} Dice: {dice:.4f}")
+
+        mean_dice = sum(dice_scores) / len(dice_scores)
+
+        train_history.append(average_train_loss)
+        val_history.append(average_val_loss)
+        dice_history.append(mean_dice)
+
+        print(
+            f"Epoch {epoch + 1}/{epochs} | "
+            f"Train Loss: {average_train_loss:.4f} | "
+            f"Val Loss: {average_val_loss:.4f} | "
+            f"Mean Dice: {mean_dice:.4f}"
+        )
+
+        # Save the model with the best validation loss
+        if average_val_loss < best_val_loss:
+            best_val_loss = average_val_loss
+
+            torch.save(
+                model.state_dict(),
+                PROJECT_DIR / "best_2d_unet_aligned.pth"
+            )
+
+            print("Best aligned 2D model saved")
+
+    # Save training graphs for the README
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    epoch_numbers = range(1, epochs + 1)
+
+    axes[0].plot(epoch_numbers, train_history, label="Training")
+    axes[0].plot(epoch_numbers, val_history, label="Validation")
+    axes[0].set_title("2D U-Net Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Weighted Cross-Entropy")
+    axes[0].legend()
+
+    axes[1].plot(epoch_numbers, dice_history)
+    axes[1].set_title("2D U-Net Validation Dice")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Mean Foreground Dice")
+    axes[1].set_ylim(0, 1)
+
+    fig.tight_layout()
+
+    output_dir = PROJECT_DIR / "outputs"
+    output_dir.mkdir(exist_ok=True)
+
+    fig.savefig(
+        output_dir / "2d_aligned_training_curves.png",
+        dpi=180
+    )
+
+    plt.close(fig)
+
+    if device.type == "cuda":
+        peak_memory = (
+            torch.cuda.max_memory_allocated() / (1024 ** 3)
+        )
+        print(f"Peak training GPU memory: {peak_memory:.3f} GB")
+
+    print(f"Best validation loss: {best_val_loss:.4f}")
+    print("Aligned 2D training complete")
+
+    return model
+
+
 def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
     """
     Train the 3D U-Net on the HipMRI MRI volumes.
