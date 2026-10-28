@@ -203,6 +203,9 @@ def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
 
     # Optimiser
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # Keep track of the best validation loss
+    best_val_loss = float("inf")
 
     # Training epochs
     for epoch in range(epochs):
@@ -302,7 +305,17 @@ def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
                     f"IoU = {average_iou:.4f}"
                 )
 
+        # Save the model if validation loss improves
+        if average_val_loss < best_val_loss:
+            best_val_loss = average_val_loss
 
+            torch.save(
+                model.state_dict(),
+                "best_3d_unet.pth"
+            )
+
+            print("Best 3D model saved")
+    
     return model
 
 
