@@ -10,7 +10,7 @@ from metrics import calculate_dice_iou
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
+from matplotlib.colors import ListedColormap
 
 def evaluate_2d(model_path=None):
     """
@@ -309,5 +309,125 @@ def visualise_3d():
 
     print(f"Visualisation saved: {output_path}")
 
+def visualise_3d_overlay():
+    """
+    Visualise the weighted 3D U-Net prediction as an overlay
+    on top of the MRI image using a validation MRI volume.
+    """
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    # Load the saved weighted 3D U-Net
+    model = UNet3D(
+        in_channels=1,
+        num_classes=6
+    ).to(device)
+
+    checkpoint = PROJECT_DIR / "best_3d_unet_weighted.pth"
+
+    model.load_state_dict(
+        torch.load(
+            checkpoint,
+            map_location=device,
+            weights_only=True
+        )
+    )
+
+    model.eval()
+
+    # Use validation patients only
+    pairs = find_volume_pairs()
+    _, val_patients, _ = split_patients(pairs)
+
+    val_pairs = [
+        pair for pair in pairs
+        if pair["patient"] in val_patients
+    ]
+
+    dataset = HipMRI3DDataset(val_pairs)
+
+    # Choose a validation volume with Class 5 present
+    selected = None
+
+    for index in range(len(dataset)):
+        image, mask, _ = dataset[index]
+
+        class5_counts = (mask == 5).sum(dim=(1, 2))
+
+        if class5_counts.max().item() > 0:
+            slice_index = class5_counts.argmax().item()
+            selected = (image, mask, val_pairs[index], slice_index)
+            break
+
+    if selected is None:
+        raise ValueError("No validation slice containing Class 5 was found")
+
+    image, mask, pair, slice_index = selected
+
+    # Predict segmentation
+    with torch.no_grad():
+        output = model(image.unsqueeze(0).to(device))
+        prediction = torch.argmax(output, dim=1).squeeze(0).cpu()
+
+    # MRI slice
+    mri_slice = image[0, slice_index].numpy()
+    mask_slice = mask[slice_index].numpy()
+    pred_slice = prediction[slice_index].numpy()
+
+    # Make label 0 transparent, colours for labels 1-5
+    overlay_cmap = ListedColormap([
+        (0, 0, 0, 0),      # class 0 transparent
+        (0, 1, 0, 0.45),   # class 1 green
+        (0.6, 0.4, 1, 0.45), # class 2 purple
+        (1, 0.4, 0.8, 0.45), # class 3 pink
+        (0.7, 0.7, 0.7, 0.45), # class 4 grey
+        (0, 1, 1, 0.45)    # class 5 cyan
+    ])
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 6))
+
+    # Ground truth overlay
+    axes[0].imshow(mri_slice, cmap="gray")
+    axes[0].imshow(
+        mask_slice,
+        cmap=overlay_cmap,
+        vmin=0,
+        vmax=5,
+        interpolation="nearest"
+    )
+    axes[0].set_title("MRI + Ground Truth")
+    axes[0].axis("off")
+
+    # Prediction overlay
+    axes[1].imshow(mri_slice, cmap="gray")
+    axes[1].imshow(
+        pred_slice,
+        cmap=overlay_cmap,
+        vmin=0,
+        vmax=5,
+        interpolation="nearest"
+    )
+    axes[1].set_title("MRI + 3D U-Net Prediction")
+    axes[1].axis("off")
+
+    fig.suptitle(
+        f"{pair['mr'].name} - Slice {slice_index}"
+    )
+
+    output_dir = PROJECT_DIR / "outputs"
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / "3d_validation_overlay.png"
+
+    plt.savefig(
+        output_path,
+        dpi=180,
+        bbox_inches="tight"
+    )
+    plt.close(fig)
+
+    print(f"Overlay visualisation saved: {output_path}")
 if __name__ == "__main__":
     evaluate_2d()
