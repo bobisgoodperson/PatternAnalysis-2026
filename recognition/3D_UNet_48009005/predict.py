@@ -429,5 +429,215 @@ def visualise_3d_overlay():
     plt.close(fig)
 
     print(f"Overlay visualisation saved: {output_path}")
+
+
+def evaluate_3d(model_path=None):
+    """
+    Evaluate the weighted 3D U-Net on held-out test patients.
+
+    Reports Dice, IoU, inference time, GPU memory
+    and model parameter count.
+    """
+
+    # Use the saved weighted model by default
+    if model_path is None:
+        model_path = PROJECT_DIR / "best_3d_unet_weighted.pth"
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    print(f"Using device: {device}")
+
+    # Select test patients using the original split
+    pairs = find_volume_pairs()
+    _, _, test_patients = split_patients(pairs)
+
+    test_pairs = [
+        pair for pair in pairs
+        if pair["patient"] in test_patients
+    ]
+
+    if not test_pairs:
+        raise ValueError("No test volumes found")
+
+    # Create the test dataset
+    test_dataset = HipMRI3DDataset(test_pairs)
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=1,
+        shuffle=False
+    )
+
+    print(f"Test patients: {len(test_patients)}")
+    print(f"Test volumes: {len(test_dataset)}")
+    print(f"Patient IDs: {test_patients}")
+
+    # Load the trained 3D U-Net
+    model = UNet3D(
+        in_channels=1,
+        num_classes=6
+    ).to(device)
+
+    model.load_state_dict(
+        torch.load(
+            model_path,
+            map_location=device,
+            weights_only=True
+        )
+    )
+
+    model.eval()
+
+    # Count all model parameters
+    parameter_count = sum(
+        parameter.numel()
+        for parameter in model.parameters()
+    )
+
+    print(f"Model parameters: {parameter_count:,}")
+
+    # Store prediction results for all test volumes
+    confusion_total = torch.zeros(
+        (6, 6), dtype=torch.long
+    )
+
+    inference_times = []
+    case_results = []
+
+    # Warm up the GPU before measuring inference time
+    if device.type == "cuda":
+        with torch.inference_mode():
+            warmup = torch.zeros(
+                (1, 1, *test_dataset.target_size),
+                device=device
+            )
+            model(warmup)
+            torch.cuda.synchronize()
+            del warmup
+
+        torch.cuda.reset_peak_memory_stats()
+
+    # Evaluate without updating model weights
+    with torch.inference_mode():
+        for index, (images, masks, _) in enumerate(test_loader):
+
+            images = images.to(device)
+            masks = masks.to(device)
+
+            # Synchronise GPU before timing
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+            start_time = time.perf_counter()
+
+            # Forward pass
+            outputs = model(images)
+
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+
+            inference_times.append(
+                time.perf_counter() - start_time
+            )
+
+            # Choose the predicted class at each voxel
+            predictions = torch.argmax(outputs, dim=1)
+
+            # Count predicted and true class combinations
+            confusion = torch.bincount(
+                masks.reshape(-1) * 6 + predictions.reshape(-1),
+                minlength=36
+            ).reshape(6, 6).cpu()
+
+            confusion_total += confusion
+
+            # Calculate mean Dice for this test volume
+            case_dice = []
+
+            for class_id in range(1, 6):
+                intersection = confusion[class_id, class_id].item()
+                true_count = confusion[class_id, :].sum().item()
+                pred_count = confusion[:, class_id].sum().item()
+
+                if true_count + pred_count > 0:
+                    dice = (
+                        2 * intersection / (true_count + pred_count)
+                    )
+                    case_dice.append(dice)
+
+            mean_case_dice = (
+                sum(case_dice) / len(case_dice)
+                if case_dice else 0.0
+            )
+
+            filename = test_pairs[index]["mr"].name
+            case_results.append((mean_case_dice, filename))
+
+            print(
+                f"{filename}: Mean Dice = {mean_case_dice:.4f}"
+            )
+
+    print("\n3D U-Net Test Results")
+
+    dice_scores = []
+    iou_scores = []
+
+    # Calculate metrics across all test voxels
+    for class_id in range(1, 6):
+        intersection = confusion_total[class_id, class_id].item()
+        true_count = confusion_total[class_id, :].sum().item()
+        pred_count = confusion_total[:, class_id].sum().item()
+
+        if true_count + pred_count == 0:
+            print(f"Class {class_id}: Absent from test predictions and labels")
+            continue
+
+        dice = 2 * intersection / (true_count + pred_count)
+
+        union = true_count + pred_count - intersection
+        iou = intersection / union
+
+        dice_scores.append(dice)
+        iou_scores.append(iou)
+
+        print(
+            f"Class {class_id}: "
+            f"Dice = {dice:.4f}, "
+            f"IoU = {iou:.4f}"
+        )
+
+    # Mean across foreground classes
+    if dice_scores:
+        mean_dice = sum(dice_scores) / len(dice_scores)
+        mean_iou = sum(iou_scores) / len(iou_scores)
+
+        print(f"\nMean Dice: {mean_dice:.4f}")
+        print(f"Mean IoU: {mean_iou:.4f}")
+
+    # Average forward-pass time per 3D volume
+    average_time = sum(inference_times) / len(inference_times)
+
+    print(
+        f"Average inference time per volume: "
+        f"{average_time:.4f} seconds"
+    )
+
+    # Peak GPU memory during evaluation
+    if device.type == "cuda":
+        peak_memory = (
+            torch.cuda.max_memory_allocated() / (1024 ** 3)
+        )
+
+        print(f"Peak GPU memory: {peak_memory:.3f} GB")
+
+    # Identify volumes for later error analysis
+    print("\nLowest-scoring test volumes:")
+
+    for dice, filename in sorted(case_results)[:5]:
+        print(f"{filename}: Mean Dice = {dice:.4f}")
+
+
 if __name__ == "__main__":
     evaluate_2d()
