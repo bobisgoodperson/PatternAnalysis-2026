@@ -1,4 +1,5 @@
 import time
+import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
@@ -619,6 +620,212 @@ def evaluate_3d(model_path=None):
     for dice, filename in sorted(case_results)[:5]:
         print(f"{filename}: Mean Dice = {dice:.4f}")
 
+
+def visualise_boundary_errors(
+    case_name="C032_Week0_LFOV.nii.gz",
+    class_id=5,
+    slice_index=None,
+    slice_batch_size=8):
+    """
+    Compare 2D and 3D segmentation errors on the same MRI slice.
+    Red shows false positives and blue shows false negatives.
+    
+    Assisted by ChatGPT model 6 with matplot code
+    """
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    # Select one volume from the held-out test patients
+    pairs = find_volume_pairs()
+    _, _, test_patients = split_patients(pairs)
+
+    selected_pairs = [
+        pair for pair in pairs
+        if pair["patient"] in test_patients
+        and pair["mr"].name == case_name
+    ]
+
+    if not selected_pairs:
+        raise ValueError(f"Test volume not found: {case_name}")
+
+    image, mask, _ = HipMRI3DDataset(selected_pairs)[0]
+
+    # Load both trained models
+    model_2d = UNet2D(in_channels=1, num_classes=6).to(device)
+    model_3d = UNet3D(in_channels=1, num_classes=6).to(device)
+
+    model_2d.load_state_dict(
+        torch.load(
+            PROJECT_DIR / "best_2d_unet_aligned.pth",
+            map_location=device,
+            weights_only=True
+        )
+    )
+
+    model_3d.load_state_dict(
+        torch.load(
+            PROJECT_DIR / "best_3d_unet_weighted.pth",
+            map_location=device,
+            weights_only=True
+        )
+    )
+
+    model_2d.eval()
+    model_3d.eval()
+
+    with torch.inference_mode():
+
+        # 2D model: predict each slice in small batches
+        slices = image.permute(1, 0, 2, 3)
+        predictions_2d = []
+
+        for start in range(0, len(slices), slice_batch_size):
+            batch = slices[start:start + slice_batch_size].to(device)
+
+            output = model_2d(batch)
+            predictions_2d.append(output.argmax(dim=1).cpu())
+
+        prediction_2d = torch.cat(predictions_2d, dim=0)
+
+        # 3D model: predict the whole volume
+        output = model_3d(image.unsqueeze(0).to(device))
+        prediction_3d = output.argmax(dim=1).squeeze(0).cpu()
+
+    # Automatically choose a slice with a large Class 5 error
+    if slice_index is None:
+        target_class = mask == class_id
+
+        present_slices = torch.where(
+            target_class.any(dim=(1, 2))
+        )[0]
+
+        if len(present_slices) == 0:
+            raise ValueError(f"Class {class_id} is absent from this volume")
+
+        errors_2d = (
+            (prediction_2d == class_id) != target_class
+        ).sum(dim=(1, 2))
+
+        errors_3d = (
+            (prediction_3d == class_id) != target_class
+        ).sum(dim=(1, 2))
+
+        combined_errors = errors_2d + errors_3d
+
+        slice_index = present_slices[
+            combined_errors[present_slices].argmax()
+        ].item()
+
+    if not 0 <= slice_index < mask.shape[0]:
+        raise ValueError("Slice index is outside the volume")
+
+    # Select the same slice from all four volumes
+    mri_slice = image[0, slice_index].numpy()
+    ground_truth = mask[slice_index].numpy()
+    pred_2d = prediction_2d[slice_index].numpy()
+    pred_3d = prediction_3d[slice_index].numpy()
+
+    # Use the same colours as the earlier 3D overlay
+    overlay_cmap = ListedColormap([
+        (0, 0, 0, 0),
+        (0, 1, 0, 0.45),
+        (0.6, 0.4, 1, 0.45),
+        (1, 0.4, 0.8, 0.45),
+        (0.7, 0.7, 0.7, 0.45),
+        (0, 1, 1, 0.45)
+    ])
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+
+    # Original MRI
+    axes[0, 0].imshow(mri_slice, cmap="gray")
+    axes[0, 0].set_title("Original MRI")
+
+    # Show ground truth and both predictions on the MRI
+    panels = [
+        (axes[0, 1], ground_truth, "Ground Truth"),
+        (axes[0, 2], pred_2d, "2D U-Net Prediction"),
+        (axes[1, 0], pred_3d, "3D U-Net Prediction")
+    ]
+
+    for ax, labels, title in panels:
+        ax.imshow(mri_slice, cmap="gray")
+        ax.imshow(
+            labels,
+            cmap=overlay_cmap,
+            vmin=0,
+            vmax=5,
+            interpolation="nearest"
+        )
+        ax.set_title(title)
+
+    # Highlight false positives and false negatives
+    error_panels = [
+        (axes[1, 1], pred_2d, "2D U-Net Errors"),
+        (axes[1, 2], pred_3d, "3D U-Net Errors")
+    ]
+
+    for ax, prediction, title in error_panels:
+
+        # False positive: predicted class is not in ground truth
+        false_positive = (
+            (prediction == class_id)
+            & (ground_truth != class_id)
+        )
+
+        # False negative: ground-truth class was missed
+        false_negative = (
+            (prediction != class_id)
+            & (ground_truth == class_id)
+        )
+
+        # Create a transparent coloured error image
+        error_overlay = np.zeros(
+            (*ground_truth.shape, 4),
+            dtype=np.float32
+        )
+
+        error_overlay[false_positive] = [1, 0, 0, 0.65]
+        error_overlay[false_negative] = [0, 0.5, 1, 0.65]
+
+        ax.imshow(mri_slice, cmap="gray")
+        ax.imshow(error_overlay, interpolation="nearest")
+        ax.set_title(title)
+
+        # Report the errors for this slice
+        print(
+            f"{title}: "
+            f"FP = {false_positive.sum()}, "
+            f"FN = {false_negative.sum()}"
+        )
+
+    for ax in axes.flat:
+        ax.axis("off")
+
+    fig.suptitle(
+        f"{case_name} | Slice {slice_index} | Class {class_id}\n"
+        "Red = False Positive | Blue = False Negative"
+    )
+
+    fig.tight_layout()
+
+    # Save the comparison for the README
+    output_dir = PROJECT_DIR / "outputs"
+    output_dir.mkdir(exist_ok=True)
+
+    short_name = case_name.replace("_LFOV.nii.gz", "")
+
+    output_path = (
+        output_dir /
+        f"errors_{short_name}_class{class_id}_slice{slice_index}.png"
+    )
+
+    plt.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Boundary comparison saved: {output_path}")
 
 if __name__ == "__main__":
     evaluate_2d()
