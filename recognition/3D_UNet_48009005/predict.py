@@ -3,9 +3,13 @@ import time
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import HipMRI2DDataset, SLICE_DATA_DIR, PROJECT_DIR
-from modules import UNet2D
+from dataset import *
+from modules import UNet2D, UNet3D
 from metrics import calculate_dice_iou
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 
 def evaluate_2d(model_path=None):
@@ -202,6 +206,108 @@ def evaluate_2d(model_path=None):
             f"{peak_memory:.3f} GB"
         )
 
+
+def visualise_3d():
+    """
+    Visualise the weighted 3D U-Net prediction
+    using a validation MRI volume.
+    """
+
+    device = torch.device(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    )
+
+    # Load the saved weighted model
+    model = UNet3D(in_channels=1, num_classes=6).to(device)
+
+    checkpoint = PROJECT_DIR / "best_3d_unet_weighted.pth"
+
+    model.load_state_dict(
+        torch.load(checkpoint, map_location=device, weights_only=True)
+    )
+
+    model.eval()
+
+    # Use validation patients, not the held-out test patients
+    pairs = find_volume_pairs()
+    _, val_patients, _ = split_patients(pairs)
+
+    val_pairs = [pair for pair in pairs if pair["patient"] in val_patients]
+
+    dataset = HipMRI3DDataset(val_pairs)
+
+    # Find a validation slice containing Class 5
+    selected = None
+
+    for index in range(len(dataset)):
+        image, mask, _ = dataset[index]
+
+        class_counts = (mask == 5).sum(dim=(1, 2))
+
+        if class_counts.max().item() > 0:
+            slice_index = class_counts.argmax().item()
+            selected = (image, mask, val_pairs[index])
+            break
+
+    if selected is None:
+        raise ValueError("No Class 5 validation slice found")
+
+    image, mask, pair = selected
+
+    # Predict the segmentation for the full 3D volume
+    with torch.no_grad():
+        output = model(image.unsqueeze(0).to(device))
+        prediction = output.argmax(dim=1).squeeze(0).cpu()
+
+    # Show the same slice across all three images
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+
+    axes[0].imshow(
+        image[0, slice_index].numpy(),
+        cmap="gray"
+    )
+    axes[0].set_title("MRI Image")
+
+    axes[1].imshow(
+        mask[slice_index].numpy(),
+        cmap="tab10",
+        vmin=-0.5,
+        vmax=5.5
+    )
+    axes[1].set_title("Ground Truth")
+
+    seg_image = axes[2].imshow(
+        prediction[slice_index].numpy(),
+        cmap="tab10",
+        vmin=-0.5,
+        vmax=5.5
+    )
+    axes[2].set_title("3D U-Net Prediction")
+
+    for ax in axes:
+        ax.axis("off")
+
+    fig.colorbar(
+        seg_image,
+        ax=axes[1:],
+        ticks=range(6),
+        shrink=0.75
+    )
+
+    fig.suptitle(
+        f"{pair['mr'].name} - Slice {slice_index}"
+    )
+
+    # Save the visualisation
+    output_dir = PROJECT_DIR / "outputs"
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / "3d_validation_prediction.png"
+
+    plt.savefig(output_path, dpi=180, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Visualisation saved: {output_path}")
 
 if __name__ == "__main__":
     evaluate_2d()
