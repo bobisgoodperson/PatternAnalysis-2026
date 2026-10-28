@@ -167,7 +167,7 @@ def evaluate_2d(model_path=None, slice_batch_size=8):
     # Average inference time for one 2D slice
     if inference_times:
 
-        average_time = (sum(inference_times) / len(test_dataset) * test_dataset.target_size[0])
+        average_time = (sum(inference_times) / (len(test_dataset) * test_dataset.target_size[0]))
 
         print(
             f"Average inference time per slice: "
