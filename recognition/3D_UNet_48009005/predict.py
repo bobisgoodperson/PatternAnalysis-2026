@@ -12,7 +12,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
-def evaluate_2d(model_path=None):
+def evaluate_2d(model_path=None, slice_batch_size=8):
     """
     Evaluate the trained 2D U-Net on the held-out HipMRI test set.
 
@@ -22,20 +22,24 @@ def evaluate_2d(model_path=None):
 
     # Use the saved best model by default
     if model_path is None:
-        model_path = PROJECT_DIR / "best_2d_unet.pth"
+        model_path = PROJECT_DIR / "best_2d_unet_aligned.pth"
 
     # Use GPU if available
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Using device: {device}")
 
-    # Load the held-out test dataset
-    test_dataset = HipMRI2DDataset(
-        SLICE_DATA_DIR / "keras_slices_test",
-        SLICE_DATA_DIR / "keras_slices_seg_test"
-    )
+    # Use the same test patients as the 3D U-Net
+    pairs = find_volume_pairs()
+    _, _, test_patients = split_patients(pairs)
+
+    test_pairs = [
+        pair for pair in pairs
+        if pair["patient"] in test_patients
+    ]
+
+    # Load the same preprocessed volumes as the 3D model
+    test_dataset = HipMRI3DDataset(test_pairs)
 
     # Batch size 1 is required because slice sizes vary
     test_loader = DataLoader(
@@ -44,7 +48,8 @@ def evaluate_2d(model_path=None):
         shuffle=False
     )
 
-    print(f"Test slices: {len(test_dataset)}")
+    print(f"Test patients: {len(test_patients)}")
+    print(f"Test volumes: {len(test_dataset)}")
 
     # Create the same model architecture used during training
     model = UNet2D(
@@ -54,31 +59,22 @@ def evaluate_2d(model_path=None):
 
     # Load the trained model weights
     model.load_state_dict(
-        torch.load(
-            model_path,
-            map_location=device
-        )
+        torch.load(model_path, map_location=device)
     )
 
     model.eval()
 
-    # Store Dice and IoU values for each class
-    dice_scores = {
-        class_id: []
-        for class_id in range(1, 6)
-    }
-
-    iou_scores = {
-        class_id: []
-        for class_id in range(1, 6)
-    }
+    # Count actual and predicted voxels across all test volumes
+    confusion_total = torch.zeros((6, 6), dtype=torch.long)
 
     inference_times = []
 
     # Warm up the GPU before timing
     if len(test_dataset) > 0:
         image, _, _ = test_dataset[0]
-        image = image.unsqueeze(0).to(device)
+        
+        # Convert the volume into a batch of 2D slices
+        image = image.permute(1, 0, 2, 3)[:slice_batch_size].to(device)
 
         with torch.no_grad():
             model(image)
@@ -92,101 +88,86 @@ def evaluate_2d(model_path=None):
 
         for images, masks, _ in test_loader:
 
-            images = images.to(device)
-            masks = masks.to(device)
+            # Convert the 3D volume into individual 2D slices
+            images = images[0].permute(1, 0, 2, 3).to(device)
+            masks = masks[0].to(device)
 
-            # Wait for previous GPU operations before timing
-            if device.type == "cuda":
-                torch.cuda.synchronize()
+            # Process the slices in smaller batches
+            for start in range(0, len(images), slice_batch_size):
+                batch_images = images[start:start + slice_batch_size]
+                batch_masks = masks[start:start + slice_batch_size]
+                # Wait for previous GPU operations before timing
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
 
-            start_time = time.perf_counter()
+                start_time = time.perf_counter()
 
-            # Forward pass
-            outputs = model(images)
+                # Forward pass
+                outputs = model(batch_images)
 
-            if device.type == "cuda":
-                torch.cuda.synchronize()
+                if device.type == "cuda":
+                    torch.cuda.synchronize()
 
-            end_time = time.perf_counter()
+                end_time = time.perf_counter()
 
-            inference_times.append(
-                end_time - start_time
-            )
-
-            # Choose the most likely class at each pixel
-            predictions = torch.argmax(
-                outputs,
-                dim=1
-            )
-
-            # Calculate Dice and IoU
-            results = calculate_dice_iou(
-                predictions,
-                masks,
-                num_classes=6
-            )
-
-            for class_id, scores in results.items():
-                dice_scores[class_id].append(
-                    scores["dice"]
+                inference_times.append(
+                    end_time - start_time
                 )
 
-                iou_scores[class_id].append(
-                    scores["iou"]
+                # Choose the most likely class at each pixel
+                predictions = torch.argmax(
+                    outputs,
+                    dim=1
                 )
+
+                # Count actual and predicted labels for this batch
+                confusion = torch.bincount((batch_masks * 6 + predictions).reshape(-1),  minlength=36).reshape(6, 6).cpu()
+
+                # Add the counts to the whole test dataset
+                confusion_total += confusion
 
     print("\n2D U-Net Test Results")
 
-    class_dice_averages = []
-    class_iou_averages = []
+    dice_scores = []
+    iou_scores = []
 
-    # Display average result for each anatomical class
+    # Calculate Dice and IoU across all test voxels
     for class_id in range(1, 6):
 
-        if dice_scores[class_id]:
+        intersection = confusion_total[class_id, class_id].item()
+        true_count = confusion_total[class_id, :].sum().item()
+        pred_count = confusion_total[:, class_id].sum().item()
 
-            average_dice = (
-                sum(dice_scores[class_id])
-                / len(dice_scores[class_id])
-            )
+        # Skip classes absent from both prediction and ground truth
+        if true_count + pred_count == 0:
+            continue
 
-            average_iou = (
-                sum(iou_scores[class_id])
-                / len(iou_scores[class_id])
-            )
+        dice = 2 * intersection / (true_count + pred_count)
 
-            class_dice_averages.append(average_dice)
-            class_iou_averages.append(average_iou)
+        union = true_count + pred_count - intersection
+        iou = intersection / union
 
-            print(
-                f"Class {class_id}: "
-                f"Dice = {average_dice:.4f}, "
-                f"IoU = {average_iou:.4f}"
-            )
+        dice_scores.append(dice)
+        iou_scores.append(iou)
+
+        print(
+            f"Class {class_id}: "
+            f"Dice = {dice:.4f}, "
+            f"IoU = {iou:.4f}"
+        )
 
     # Mean across foreground classes
-    if class_dice_averages:
-
-        mean_dice = (
-            sum(class_dice_averages)
-            / len(class_dice_averages)
-        )
-
-        mean_iou = (
-            sum(class_iou_averages)
-            / len(class_iou_averages)
-        )
+    if dice_scores:
+        mean_dice = sum(dice_scores) / len(dice_scores)
+        mean_iou = sum(iou_scores) / len(iou_scores)
 
         print(f"\nMean Dice: {mean_dice:.4f}")
         print(f"Mean IoU: {mean_iou:.4f}")
-
+        
     # Average inference time for one 2D slice
     if inference_times:
 
-        average_time = (
-            sum(inference_times)
-            / len(inference_times)
-        )
+        average_time = (sum(inference_times) / len(test_dataset) * test_dataset.target_size[0])
 
         print(
             f"Average inference time per slice: "

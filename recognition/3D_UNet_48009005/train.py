@@ -181,27 +181,17 @@ def train_2d_aligned(epochs=20, slice_batch_size=8, learning_rate=0.001):
     assert set(train_patients).isdisjoint(test_patients)
     assert set(val_patients).isdisjoint(test_patients)
 
-    train_pairs = [
-        pair for pair in pairs
-        if pair["patient"] in train_patients
-    ]
+    train_pairs = [pair for pair in pairs if pair["patient"] in train_patients]
 
-    val_pairs = [
-        pair for pair in pairs
-        if pair["patient"] in val_patients
-    ]
+    val_pairs = [pair for pair in pairs if pair["patient"] in val_patients]
 
     # Reuse the 3D preprocessing to keep inputs consistent
     train_dataset = HipMRI3DDataset(train_pairs)
     val_dataset = HipMRI3DDataset(val_pairs)
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=1, shuffle=True
-    )
+    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
 
-    val_loader = DataLoader(
-        val_dataset, batch_size=1, shuffle=False
-    )
+    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 
     print(f"Training volumes: {len(train_dataset)}")
     print(f"Validation volumes: {len(val_dataset)}")
@@ -209,9 +199,7 @@ def train_2d_aligned(epochs=20, slice_batch_size=8, learning_rate=0.001):
     # Use the existing 2D U-Net architecture
     model = UNet2D(in_channels=1, num_classes=6).to(device)
 
-    parameter_count = sum(
-        p.numel() for p in model.parameters()
-    )
+    parameter_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {parameter_count:,}")
 
     # Same training class weights as the weighted 3D U-Net
@@ -221,16 +209,12 @@ def train_2d_aligned(epochs=20, slice_batch_size=8, learning_rate=0.001):
         device=device
     )
 
-    class_weights = torch.sqrt(
-        class_counts.sum() / class_counts
-    )
+    class_weights = torch.sqrt(class_counts.sum() / class_counts)
     class_weights = class_weights / class_weights.mean()
 
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=learning_rate
-    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     best_val_loss = float("inf")
 
@@ -286,9 +270,7 @@ def train_2d_aligned(epochs=20, slice_batch_size=8, learning_rate=0.001):
         validation_slices = 0
 
         # Count actual and predicted voxels for each class
-        confusion = torch.zeros(
-            (6, 6), dtype=torch.long, device=device
-        )
+        confusion = torch.zeros((6, 6), dtype=torch.long, device=device)
 
         with torch.inference_mode():
 
