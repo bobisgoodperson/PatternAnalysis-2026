@@ -197,9 +197,20 @@ def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
 
     # Create 3D U-Net
     model = UNet3D(in_channels=1, num_classes=6).to(device)
+    
+    # Training voxel counts for each class
+    class_counts = torch.tensor(
+        [87254835, 53391820, 4918408, 855653, 217516, 162408],
+        dtype=torch.float32,
+        device=device
+    )
 
-    # Multi-class segmentation loss
-    criterion = nn.CrossEntropyLoss()
+    # Give less common classes greater importance
+    class_weights = torch.sqrt(class_counts.sum() / class_counts)
+    class_weights = class_weights / class_weights.mean()
+
+    # Weighted cross-entropy loss
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     # Optimiser
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -311,13 +322,10 @@ def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
 
             torch.save(
                 model.state_dict(),
-                "best_3d_unet.pth"
+                "best_3d_unet_weighted.pth"
             )
 
             print("Best 3D model saved")
     
     return model
 
-
-if __name__ == "__main__":
-    train_2d()
