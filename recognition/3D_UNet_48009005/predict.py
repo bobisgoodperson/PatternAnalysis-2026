@@ -625,7 +625,8 @@ def visualise_boundary_errors(
     case_name="C032_Week0_LFOV.nii.gz",
     class_id=5,
     slice_index=None,
-    slice_batch_size=8):
+    slice_batch_size=8,
+    slice_mode="max_error"):
     """
     Compare 2D and 3D segmentation errors on the same MRI slice.
     Red shows false positives and blue shows false negatives.
@@ -693,30 +694,37 @@ def visualise_boundary_errors(
         output = model_3d(image.unsqueeze(0).to(device))
         prediction_3d = output.argmax(dim=1).squeeze(0).cpu()
 
-    # Automatically choose a slice with a large Class 5 error
+    
+    # Select a slice for boundary analysis
     if slice_index is None:
         target_class = mask == class_id
 
-        present_slices = torch.where(
-            target_class.any(dim=(1, 2))
-        )[0]
+        # Find slices containing the selected class
+        present_slices = torch.where(target_class.any(dim=(1, 2)))[0]
 
         if len(present_slices) == 0:
             raise ValueError(f"Class {class_id} is absent from this volume")
 
-        errors_2d = (
-            (prediction_2d == class_id) != target_class
-        ).sum(dim=(1, 2))
+        if slice_mode == "first":
+            slice_index = present_slices[0].item()
 
-        errors_3d = (
-            (prediction_3d == class_id) != target_class
-        ).sum(dim=(1, 2))
+        elif slice_mode == "last":
+            slice_index = present_slices[-1].item()
 
-        combined_errors = errors_2d + errors_3d
+        elif slice_mode == "max_error":
+            # Original behaviour: choose the slice with most errors
+            errors_2d = ((prediction_2d == class_id) != target_class).sum(dim=(1, 2))
 
-        slice_index = present_slices[
-            combined_errors[present_slices].argmax()
-        ].item()
+            errors_3d = ((prediction_3d == class_id) != target_class).sum(dim=(1, 2))
+
+            combined_errors = errors_2d + errors_3d
+
+            slice_index = present_slices[combined_errors[present_slices].argmax()].item()
+
+        else:
+            raise ValueError(
+                "slice_mode must be 'first', 'last', or 'max_error'"
+            )
 
     if not 0 <= slice_index < mask.shape[0]:
         raise ValueError("Slice index is outside the volume")
