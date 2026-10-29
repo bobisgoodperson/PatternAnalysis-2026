@@ -4,6 +4,7 @@ import torch.nn as nn
 class DoubleConv2D(nn.Module):
     """
     Two 3x3 convolutuions layers used throughout the 2D U-Net
+    Double convolution block adapted from my COMP3710 Demo 2.
     """
     
     def __init__(self, in_channels, out_channels):
@@ -88,7 +89,9 @@ class DoubleConv3D(nn.Module):
 
 class UNet2D(nn.Module):
     """
-    2D UNet baseline adapted for HipMRI segmentation
+    2D UNet baseline adapted from my COMP3710 Demo 2 implementation.
+    Modified for HipMRI segmentation with six output classes.
+    
     Based on the UNet architecture proposed by Ronneberger, Fischer and Brox (2015)
     """ 
     def __init__(self, in_channels = 1, num_classes = 6):
