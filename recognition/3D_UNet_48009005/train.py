@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import re
 
 from dataset import *
 from modules import UNet2D, UNet3D
@@ -11,6 +15,7 @@ from metrics import calculate_dice_iou
 def train_2d(epochs=5, batch_size=1, learning_rate=0.001):
     """
     Train the 2D U-Net baseline on the HipMRI training slices.
+    NOT USED ANYMORE
     """
 
     # Use GPU if available
@@ -158,11 +163,12 @@ def train_2d(epochs=5, batch_size=1, learning_rate=0.001):
             print ("best model saved")
     return model
 
-
 def train_2d_aligned(epochs=20, slice_batch_size=8, learning_rate=0.001):
     """
     Train a 2D U-Net on the same patients and preprocessed
     MRI volumes used by the 3D U-Net.
+    
+    Assisted by ChatGPT 6 model 6.0 for plotting
     """
 
     torch.manual_seed(67)
@@ -346,10 +352,6 @@ def train_2d_aligned(epochs=20, slice_batch_size=8, learning_rate=0.001):
             print("Best aligned 2D model saved")
 
     # Save training graphs for the README
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     epoch_numbers = range(1, epochs + 1)
 
@@ -561,3 +563,84 @@ def train_3d(epochs=5, batch_size=1, learning_rate=0.001):
     
     return model
 
+def plot_3d_training(log_file="3D_TRAIN_707312.out"):
+    """
+    Plot 3D U-Net training results from an existing SLURM log.
+    
+    Assisted by ChatGPT Model 6 to generate plotting
+    """
+    # Read the training log
+    log = (PROJECT_DIR / log_file).read_text()
+
+    # Extract training and validation losses
+    train_matches = re.findall(
+        r"3D Epoch (\d+)/\d+ Training Loss: ([\d.]+)",
+        log
+    )
+
+    val_matches = re.findall(
+        r"Validation Loss: ([\d.]+)",
+        log
+    )
+
+    dice_matches = re.findall(
+        r"Class (\d+): Dice = ([\d.]+), IoU = ([\d.]+)",
+        log
+    )
+
+    epochs = [int(epoch) for epoch, _ in train_matches]
+    train_loss = [float(loss) for _, loss in train_matches]
+    val_loss = [float(loss) for loss in val_matches]
+
+    # Check that each epoch has complete results
+    if not epochs or len(epochs) != len(val_loss):
+        raise ValueError("Incomplete training loss data")
+
+    if len(dice_matches) != len(epochs) * 5:
+        raise ValueError("Incomplete validation Dice data")
+
+    # Calculate mean Dice across foreground classes 1-5
+    mean_dice = []
+
+    for i in range(len(epochs)):
+        scores = dice_matches[i * 5:(i + 1) * 5]
+
+        if [int(s[0]) for s in scores] != [1, 2, 3, 4, 5]:
+            raise ValueError("Unexpected class order")
+
+        mean_dice.append(
+            sum(float(s[1]) for s in scores) / 5
+        )
+
+    # Plot losses and validation Dice
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+    axes[0].plot(epochs, train_loss, label="Training")
+    axes[0].plot(epochs, val_loss, label="Validation")
+    axes[0].set_title("3D U-Net Loss")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Weighted Cross-Entropy")
+    axes[0].legend()
+
+    axes[1].plot(epochs, mean_dice)
+    axes[1].set_title("3D U-Net Validation Dice")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Mean Foreground Dice")
+    axes[1].set_ylim(0, 1)
+
+    fig.tight_layout()
+
+    # Save the figure
+    output_dir = PROJECT_DIR / "outputs"
+    output_dir.mkdir(exist_ok=True)
+
+    output_path = output_dir / "3d_training_curves.png"
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+    best_index = val_loss.index(min(val_loss))
+
+    print(f"Epochs found: {len(epochs)}")
+    print(f"Lowest validation-loss epoch: {epochs[best_index]}")
+    print(f"Lowest validation loss: {val_loss[best_index]:.4f}")
+    print(f"Plot saved: {output_path}")
